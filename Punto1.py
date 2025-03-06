@@ -1,6 +1,7 @@
 from pyomo.environ import *
 from pyomo.opt import SolverFactory
-
+import matplotlib.pyplot as plt
+import numpy as np
 
 Model = ConcreteModel()
 
@@ -67,3 +68,32 @@ solver=SolverFactory('glpk')
 solver.solve(Model)
 
 Model.display()
+
+# ----------------- GRÁFICO -----------------
+
+# Obtener los valores de la solución
+recursos = list(Model.R)
+aviones = list(Model.A)
+
+# Crear una matriz para almacenar la cantidad de cada recurso en cada avión
+asignaciones = np.zeros((len(recursos), len(aviones)))
+
+for i in recursos:
+    for j in aviones:
+        asignaciones[i-1, j-1] = Model.x[i, j].value if Model.x[i, j].value is not None else 0  # Asegurar que no haya None
+
+# Graficar
+plt.figure(figsize=(10, 6))
+
+for i in range(len(recursos)):
+    plt.plot(aviones, asignaciones[i], marker='o', linestyle='-', label=f'Recurso {i+1}')
+
+plt.xlabel('Aviones')
+plt.ylabel('Cantidad de recurso asignado')
+plt.title('Distribución de recursos en los aviones')
+plt.xticks(aviones)
+plt.legend()
+plt.grid()
+
+# Mostrar gráfico
+plt.show()
