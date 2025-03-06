@@ -1,120 +1,112 @@
+from pyomo.environ import *
 import numpy as np
-import csv
+import pandas as pd
+import matplotlib.pyplot as plt
+import networkx as nx
 
-def read_cost_matrix_csv(filename):
-    """
-    Reads a cost matrix from a CSV file and returns it as a numpy array.
-    
-    The first row of the CSV is assumed to contain the node IDs.
-    
-    Parameters:
-        filename (str): Name of the input CSV file.
-    
-    Returns:
-        numpy.ndarray: The cost matrix read from the file.
-    """
-    with open(filename, 'r', newline='') as csvfile:
-        reader = csv.reader(csvfile)
-        # Read the first row to get the node IDs.
-        node_ids = next(reader)
-        # Read the remaining rows as data.
-        data = list(reader)
-    
-    # Convert the data to a numpy array.
-    cost_matrix = np.array(data, dtype=int)
-    
-    return cost_matrix
+# Función para cargar la matriz de costos desde un archivo CSV
+def cargar_matriz_costos(archivo):
+    df = pd.read_csv(archivo, index_col=0)
+    return df.values
 
-from pyomo . environ import *
-model = ConcreteModel ()
-num_cities = 9
-cost_matrix = read_cost_matrix_csv('cost_matrix_50_nodes_2.0_spread.csv')
+# Selección del archivo según el tamaño del problema
+tamano_problema = 10  # Cambia este valor según el caso de prueba
+archivos = {
+    5: "cost_matrix_5_nodes_2.5_spread.csv",
+    10: "cost_matrix_10_nodes_1.5_spread.csv",
+    15: "cost_matrix_15_nodes_2.5_spread.csv",
+    20: "cost_matrix_20_nodes_0.5_spread.csv",
+    50: "cost_matrix_50_nodes_1.0_spread.csv",
+    100: "cost_matrix_100_nodes_0.5_spread.csv"
+}
 
-# Set of cities
-model.N = RangeSet(1, num_cities)
+archivo_costos = archivos[tamano_problema]
+cost_matrix = cargar_matriz_costos(archivo_costos)
+num_localidades = cost_matrix.shape[0]
+num_equipos = 3  # Número de equipos de inspección
 
-# Decision variables x[i, j] = 1 if we travel from city i to city j
-model.x = Var(model.N, model.N, within=Binary)
+# Definición del modelo
+model = ConcreteModel()
 
-# Auxiliary variable u[i] to enforce subtour elimination
-model.u = Var(model.N, within=NonNegativeIntegers, bounds=(1, num_cities - 1))
+# Conjuntos
+model.N = RangeSet(0, num_localidades - 1)  # Localidades
+model.K = RangeSet(1, num_equipos)  # Equipos
 
-# Cost parameter from cost_matrix
-def cost_init(model, i, j):
-    return cost_matrix[i - 1][j - 1]
+# Parámetros
+model.c = Param(model.N, model.N, initialize={(i, j): cost_matrix[i, j] if j < cost_matrix.shape[1] else 9999 for i in range(num_localidades) for j in range(num_localidades)}, mutable=True)
 
-model.c =Param(model.N, model.N, initialize=cost_init)
+# Variables de decisión
+model.x = Var(model.N, model.N, model.K, within=Binary)  # Si el equipo k viaja de i a j
+model.u = Var(model.N, model.K, within=NonNegativeReals)  # Para evitar subtours
 
-        # Objective function: minimize total travel cost
-def _objective_function(model):
-    return sum(model.x[i, j] * model.c[i, j]
-                for i in model.N for j in model.N)
+# Función objetivo: Minimizar la distancia total recorrida
+model.obj = Objective(expr=sum(model.c[i, j] * model.x[i, j, k] for i in model.N for j in model.N if i != j for k in model.K), sense=minimize)
 
-model.objective = Objective(rule=_objective_function, sense=minimize)
+# Restricciones
+# Cada equipo debe salir exactamente una vez desde la localidad 0
+model.salida = ConstraintList()
+for k in model.K:
+    model.salida.add(sum(model.x[0, j, k] for j in model.N if j != 0) == 1)
 
- # Constraint: each city has exactly one outbound arc
-def _outbound_rule(model, i):
-    return sum(model.x[i, j] for j in model.N if j != i) == 1
+# Cada equipo debe regresar exactamente una vez a la localidad 0
+model.regreso = ConstraintList()
+for k in model.K:
+    model.regreso.add(sum(model.x[i, 0, k] for i in model.N if i != 0) == 1)
 
-model.outbound = Constraint(model.N, rule=_outbound_rule)
+# Cada localidad debe ser visitada exactamente una vez por algún equipo
+model.visita = ConstraintList()
+for j in model.N:
+    if j != 0:
+        model.visita.add(sum(model.x[i, j, k] for i in model.N if i != j for k in model.K) == 1)
 
-# Constraint: each city has exactly one inbound arc
-def _inbound_rule(model, j):
-    return sum(model.x[i, j] for i in model.N if i != j) == 1
+# Restricción de flujo: Lo que entra a una localidad debe salir
+model.flujo = ConstraintList()
+for k in model.K:
+    for j in model.N:
+        if j != 0:
+            model.flujo.add(sum(model.x[i, j, k] for i in model.N if i != j) - sum(model.x[j, i, k] for i in model.N if i != j) == 0)
 
-model.inbound = Constraint(model.N, rule=_inbound_rule)
+# Equilibrar la carga de trabajo entre equipos (ajuste de balanceo)
+model.balanceo = ConstraintList()
+for k in model.K:
+    model.balanceo.add(sum(model.x[i, j, k] for i in model.N for j in model.N if i != j) >= (num_localidades // num_equipos) - 1)
+    model.balanceo.add(sum(model.x[i, j, k] for i in model.N for j in model.N if i != j) <= (num_localidades // num_equipos) + 1)
 
-# No self-loops: x[i, i] = 0
-def _no_self_loops(model, i):
-    return model.x[i, i] == 0
+# Subtours - Miller-Tucker-Zemlin Formulation
+model.subtour = ConstraintList()
+for i in model.N:
+    for j in model.N:
+        if i != j and i != 0 and j != 0:
+            for k in model.K:
+                model.subtour.add(model.u[i, k] - model.u[j, k] + num_localidades * model.x[i, j, k] <= num_localidades - 1)
 
-model.no_self_loops = Constraint(model.N, rule=_no_self_loops)
+# Resolver el modelo
+solver = SolverFactory('glpk')
+solver.solve(model)
 
-# Subtour elimination constraints
-def _subtour_elimination(model, i, j):
-    if i != j and i != 1 and j != 1:
-        return model.u[i] - model.u[j] + self.num_cities * model.x[i, j] <= num_cities - 1
-    else:
-        return Constraint.Skip
+# Visualización de rutas mejorada
+plt.figure(figsize=(10, 8))
+G = nx.DiGraph()
+colors = {1: "red", 2: "blue", 3: "green"}  # Colores por equipo
+for i in range(num_localidades):
+    for j in range(num_localidades):
+        for k in range(1, num_equipos + 1):
+            if model.x[i, j, k].value is not None and model.x[i, j, k].value > 0.5:
+                G.add_edge(i, j, label=f'Eq{k}', color=colors[k])
 
-model.subtour_elimination = Constraint(model.N, model.N, rule=_subtour_elimination)
+pos = nx.spring_layout(G, seed=42)
+edges = G.edges()
+colors = [G[u][v]['color'] for u, v in edges]
+nx.draw(G, pos, with_labels=True, node_size=700, node_color="lightblue", edgecolors="black", edge_color=colors, width=2.0)
+labels = nx.get_edge_attributes(G, 'label')
+nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)
+plt.title("Rutas Óptimas para Equipos de Inspección")
+plt.show()
 
-def print_model(self):
-        """Prints the model structure."""
-        self.model.pprint()
-
-def solve_model(self):
-    """Solves the TSP model using the 'appsi_highs' solver."""
-    solver = SolverFactory('appsi_highs')
-    solver.options['parallel'] = 'on'
-    solver.options['time_limit'] = 20 * 60
-    solver.options['presolve'] = 'on'
-    result = solver.solve(model, tee=True)
-    print(result)
-
-def print_output(self):
-        """
-        Plots the solution as a directed graph using NetworkX and matplotlib.
-        Since there's only one route (single driver), all edges are colored the same.
-        """
-    valid_edges = []
-    for i in self.model.N:
-        for j in self.model.N:
-            if value(self.model.x[i, j]) > 0.5:
-                    valid_edges.append((i, j))
-
-        # Build a directed graph
-        G = nx.DiGraph()
-        G.add_nodes_from(self.model.N)
-
-        # Add edges from the solution
-        for (i, j) in valid_edges:
-            G.add_edge(i, j)
-
-        pos = nx.spring_layout(G)
-        nx.draw_networkx(G, pos, with_labels=True,
-                         node_color='lightblue',
-                         edge_color='red',
-                         arrows=True)
-        plt.axis("off")
-        plt.show()
+# Mostrar solución
+print("Rutas óptimas:")
+for i in range(num_localidades):
+    for j in range(num_localidades):
+        for k in range(1, num_equipos + 1):
+            if model.x[i, j, k].value is not None and model.x[i, j, k].value > 0.5:
+                print(f"Equipo {k}: {i} -> {j}, Costo: {model.c[i, j].value:.2f}")
