@@ -84,6 +84,22 @@ for i in model.N:
 solver = SolverFactory('glpk')
 solver.solve(model)
 
+# Mostrar solución en la terminal
+print("\n=== Rutas Óptimas ===")
+total_cost = 0
+for k in range(1, num_equipos + 1):
+    print(f"\nEquipo {k}:")
+    equipo_cost = 0
+    for i in range(num_localidades):
+        for j in range(num_localidades):
+            if model.x[i, j, k].value is not None and model.x[i, j, k].value > 0.5:
+                costo = model.c[i, j].value
+                print(f"{i} -> {j}, Costo: {costo:.2f}")
+                equipo_cost += costo
+    print(f"Costo total del equipo {k}: {equipo_cost:.2f}")
+    total_cost += equipo_cost
+print(f"\nCosto total de todas las rutas: {total_cost:.2f}")
+
 # Visualización de rutas mejorada
 plt.figure(figsize=(10, 8))
 G = nx.DiGraph()
@@ -102,11 +118,3 @@ labels = nx.get_edge_attributes(G, 'label')
 nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)
 plt.title("Rutas Óptimas para Equipos de Inspección")
 plt.show()
-
-# Mostrar solución
-print("Rutas óptimas:")
-for i in range(num_localidades):
-    for j in range(num_localidades):
-        for k in range(1, num_equipos + 1):
-            if model.x[i, j, k].value is not None and model.x[i, j, k].value > 0.5:
-                print(f"Equipo {k}: {i} -> {j}, Costo: {model.c[i, j].value:.2f}")
